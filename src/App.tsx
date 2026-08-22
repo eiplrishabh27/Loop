@@ -7,6 +7,8 @@ import { ThemeTrendsView } from './components/ThemeTrendsView';
 import { AskLoopView } from './components/AskLoopView';
 import { VoCReportsView } from './components/VoCReportsView';
 import { WorkspaceTeamView } from './components/WorkspaceTeamView';
+import { PublicFeedbackPortal } from './components/PublicFeedbackPortal';
+import { AuthModal } from './components/AuthModal';
 import {
   Workspace,
   UserProfile,
@@ -15,18 +17,44 @@ import {
   ThemeItem,
   VoCReport,
   FeedbackStatus,
+  User,
 } from './types/loop';
-import { SEED_WORKSPACES } from './data/seedData';
+import { SEED_WORKSPACES, SEED_USERS } from './data/seedData';
 import { Loader2, AlertCircle, Sparkles, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
-  // Navigation State
-  const [activeTab, setActiveTab] = useState('dashboard');
+  // Navigation State (Detect /feedback from hash or path if present)
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname.toLowerCase();
+      const hash = window.location.hash.toLowerCase();
+      if (path.includes('feedback') || hash.includes('feedback')) {
+        return 'public-feedback';
+      }
+    }
+    return 'dashboard';
+  });
+
+  // Authentication State
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('loop_user');
+      if (stored) {
+        try {
+          return JSON.parse(stored);
+        } catch {
+          // ignore parsing error
+        }
+      }
+    }
+    return SEED_USERS[0];
+  });
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
   // Workspaces & User State
   const [workspaces, setWorkspaces] = useState<Workspace[]>(SEED_WORKSPACES);
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace>(SEED_WORKSPACES[0]);
-  const [userRole, setUserRole] = useState<UserRole>('ADMIN');
+  const [userRole, setUserRole] = useState<UserRole>(currentUser?.role || 'ADMIN');
 
   // Core Data State
   const [feedbackList, setFeedbackList] = useState<FeedbackItem[]>([]);
@@ -43,6 +71,16 @@ export default function App() {
     setToastNotice({ message, type });
     setTimeout(() => setToastNotice(null), 4000);
   };
+
+  // Sync role when currentUser changes
+  useEffect(() => {
+    if (currentUser) {
+      setUserRole(currentUser.role);
+      localStorage.setItem('loop_user', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('loop_user');
+    }
+  }, [currentUser]);
 
   // Fetch all workspace data
   const fetchWorkspaceData = useCallback(async (wsId: string) => {
@@ -102,6 +140,29 @@ export default function App() {
       fetchWorkspaceData(ws.id);
       showToast(`Switched to workspace: ${ws.name}`, 'info');
     }
+  };
+
+  // Handle Login / Registration Success
+  const handleLoginSuccess = (user: User, workspace?: Workspace) => {
+    setCurrentUser(user);
+    setUserRole(user.role);
+    if (workspace) {
+      setWorkspaces((prev) => {
+        if (prev.some((w) => w.id === workspace.id)) return prev;
+        return [...prev, workspace];
+      });
+      setCurrentWorkspace(workspace);
+      fetchWorkspaceData(workspace.id);
+    }
+    showToast(`Signed in as ${user.name} (${user.role})`, 'success');
+  };
+
+  // Handle Logout
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setUserRole('VIEWER');
+    showToast('Signed out of session.', 'info');
+    setIsAuthModalOpen(true);
   };
 
   // Handle Workspace Creation
@@ -169,7 +230,6 @@ export default function App() {
 
     const created: FeedbackItem = await res.json();
     setFeedbackList((prev) => [created, ...prev]);
-    // Refresh themes & dashboard
     fetchWorkspaceData(currentWorkspace.id);
     showToast(`New feedback classified: "${created.title}"`, 'success');
     return created;
@@ -297,11 +357,14 @@ export default function App() {
         workspaces={workspaces}
         currentWorkspace={currentWorkspace}
         onSelectWorkspace={handleSelectWorkspace}
+        currentUser={currentUser}
         userRole={userRole}
         onChangeUserRole={setUserRole}
         onReseedData={handleReseed}
         onSimulateIncoming={() => handleSimulateChannel('ZENDESK')}
         totalFeedbackCount={feedbackList.length}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
       />
 
       {/* Floating Toast Notification */}
@@ -325,6 +388,15 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onLoginSuccess={handleLoginSuccess}
+        workspaces={workspaces}
+        currentWorkspace={currentWorkspace}
+      />
 
       {/* Main Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -350,6 +422,21 @@ export default function App() {
           </div>
         ) : (
           <div>
+            {/* View: Public Customer Feedback Submission Portal (/feedback) */}
+            {activeTab === 'public-feedback' && (
+              <PublicFeedbackPortal
+                currentWorkspace={currentWorkspace}
+                onFeedbackSubmitted={(item) => {
+                  setFeedbackList((prev) => [item, ...prev]);
+                  showToast('Your real feedback was analyzed and sent to engineering!', 'success');
+                }}
+                onViewDashboard={() => {
+                  setActiveTab('dashboard');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+              />
+            )}
+
             {/* View 1: Analytics Dashboard */}
             {activeTab === 'dashboard' && (
               <DashboardView
@@ -448,8 +535,15 @@ export default function App() {
             <span className="font-bold text-slate-400">Project LOOP</span>
             <span>• AI Feedback Intelligence & Product Synthesis</span>
           </div>
-          <div className="text-[11px] font-mono text-slate-600">
-            Powered by Gemini AI • Multi-Tenant Architecture
+          <div className="flex items-center gap-4 text-[11px] font-mono text-slate-600">
+            <button
+              onClick={() => setActiveTab('public-feedback')}
+              className="text-blue-400 hover:text-blue-300 transition-colors cursor-pointer"
+            >
+              Public Feedback Portal (/feedback)
+            </button>
+            <span>•</span>
+            <span>Powered by Gemini AI • Multi-Tenant Architecture</span>
           </div>
         </div>
       </footer>

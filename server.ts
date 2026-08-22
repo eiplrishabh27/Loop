@@ -11,6 +11,9 @@ import {
   VoCReport,
   UserRole,
   GroundedSource,
+  CustomerTier,
+  FeedbackChannel,
+  UrgencyLevel,
 } from "./src/types/loop";
 import {
   SEED_WORKSPACES,
@@ -161,6 +164,252 @@ async function startServer() {
       (u) => u.workspaceId === workspaceId || u.email.endsWith("@loop.dev")
     );
     res.json(users);
+  });
+
+  // -------------------------------------------------------------
+  // Authentication & Registration Endpoints
+  // -------------------------------------------------------------
+  app.post("/api/auth/login", (req, res) => {
+    const { email, password } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "Email is required." });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const existingUser = Array.from(db.users.values()).find(
+      (u) => u.email.toLowerCase() === cleanEmail
+    );
+
+    if (existingUser) {
+      return res.json({
+        user: existingUser,
+        token: `loop_token_${existingUser.id}_${Date.now()}`,
+      });
+    }
+
+    // If demo or first-time email, auto-create a user profile
+    const namePart = cleanEmail.split("@")[0].replace(/[._-]/g, " ");
+    const formattedName = namePart.charAt(0).toUpperCase() + namePart.slice(1);
+    const newUserId = `usr-${Date.now().toString(36)}`;
+    const defaultWs = Array.from(db.workspaces.values())[0]?.id || "ws-acme-101";
+
+    const newUser: User = {
+      id: newUserId,
+      name: formattedName || "Member",
+      email: cleanEmail,
+      role: cleanEmail.includes("admin") ? "ADMIN" : cleanEmail.includes("analyst") ? "ANALYST" : "ADMIN",
+      workspaceId: defaultWs,
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${cleanEmail}`,
+      title: "Product Leader",
+    };
+
+    db.users.set(newUserId, newUser);
+    return res.json({
+      user: newUser,
+      token: `loop_token_${newUser.id}_${Date.now()}`,
+    });
+  });
+
+  app.post("/api/auth/register", (req, res) => {
+    const { name, email, password, role = "ADMIN", company, workspaceName } = req.body;
+    if (!name || !email) {
+      return res.status(400).json({ error: "Name and Email are required." });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const existingUser = Array.from(db.users.values()).find(
+      (u) => u.email.toLowerCase() === cleanEmail
+    );
+
+    if (existingUser) {
+      return res.status(409).json({
+        error: "An account with this email already exists. Please sign in.",
+        user: existingUser,
+      });
+    }
+
+    // Create a personalized workspace for new user if company provided
+    let userWorkspaceId = Array.from(db.workspaces.values())[0]?.id || "ws-acme-101";
+    if (workspaceName || company) {
+      const orgName = (workspaceName || company || "My Organization").trim();
+      const newWsId = `ws-${Date.now().toString(36)}`;
+      const newWs: Workspace = {
+        id: newWsId,
+        name: orgName,
+        slug: orgName.toLowerCase().replace(/[^a-z0-9]/g, "-"),
+        industry: "Technology & Software",
+        domain: `${orgName.toLowerCase().replace(/[^a-z0-9]/g, "")}.com`,
+        createdAt: new Date().toISOString(),
+      };
+      db.workspaces.set(newWsId, newWs);
+      db.feedback.set(newWsId, generateSeedFeedback(newWsId));
+      db.themes.set(
+        newWsId,
+        SEED_THEMES.map((t) => ({ ...t, workspaceId: newWsId }))
+      );
+      db.reports.set(newWsId, [{ ...SEED_VOC_REPORT, workspaceId: newWsId }]);
+      userWorkspaceId = newWsId;
+    }
+
+    const newUserId = `usr-${Date.now().toString(36)}`;
+    const userRole: UserRole = (["ADMIN", "ANALYST", "VIEWER"].includes(role) ? role : "ADMIN") as UserRole;
+
+    const newUser: User = {
+      id: newUserId,
+      name: name.trim(),
+      email: cleanEmail,
+      role: userRole,
+      workspaceId: userWorkspaceId,
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(cleanEmail)}`,
+      title: role === "ADMIN" ? "Workspace Administrator" : role === "ANALYST" ? "Voice of Customer Lead" : "Team Member",
+    };
+
+    db.users.set(newUserId, newUser);
+
+    return res.status(201).json({
+      user: newUser,
+      workspace: db.workspaces.get(userWorkspaceId),
+      token: `loop_token_${newUser.id}_${Date.now()}`,
+    });
+  });
+
+  // -------------------------------------------------------------
+  // Public Customer Feedback Submission (/feedback portal)
+  // -------------------------------------------------------------
+  app.post("/api/feedback/public", async (req, res) => {
+    try {
+      const targetWorkspaceId =
+        (req.body.workspaceId as string) ||
+        (req.headers["x-workspace-id"] as string) ||
+        Array.from(db.workspaces.values())[0]?.id ||
+        "ws-acme-101";
+
+      const content = (req.body.content || req.body.feedback || req.body.message || "").trim();
+      const customerName = (req.body.customerName || req.body.name || "Customer").trim();
+      const customerEmail = (req.body.customerEmail || req.body.email || `${customerName.toLowerCase().replace(/[^a-z0-9]/g, ".")}@example.com`).trim();
+      const customerCompany = (req.body.customerCompany || req.body.company || "Enterprise Customer").trim();
+      const customerTier = (req.body.customerTier || "PRO") as CustomerTier;
+      const channel = (req.body.channel || "INTERCOM") as FeedbackChannel;
+      const title = (req.body.title || req.body.headline || "Customer Feedback").trim();
+      const urgency = (req.body.urgency || "MEDIUM") as UrgencyLevel;
+      const category = (req.body.category || "General").trim();
+
+      if (!content) {
+        return res.status(400).json({ error: "Feedback content is required." });
+      }
+
+      // Rule-based heuristics
+      const lower = content.toLowerCase();
+      let defaultFeature = category !== "General" ? category : "Product Experience";
+      let defaultThemes = [category !== "General" ? category : "Customer Suggestions"];
+      let defaultSentiment: "POSITIVE" | "NEUTRAL" | "NEGATIVE" = "NEUTRAL";
+      let defaultSentimentScore = 0.0;
+      let defaultUrgency = urgency;
+
+      if (lower.includes("crash") || lower.includes("fail") || lower.includes("broken") || lower.includes("error") || lower.includes("down") || lower.includes("bug")) {
+        defaultSentiment = "NEGATIVE";
+        defaultSentimentScore = -0.8;
+        defaultUrgency = "HIGH";
+        defaultFeature = "Platform Stability";
+        defaultThemes = ["App Reliability", "Bug Report"];
+      } else if (lower.includes("slow") || lower.includes("freeze") || lower.includes("latency") || lower.includes("lag")) {
+        defaultSentiment = "NEGATIVE";
+        defaultSentimentScore = -0.65;
+        defaultFeature = "Performance";
+        defaultThemes = ["Latency & Load Speed"];
+      } else if (lower.includes("great") || lower.includes("love") || lower.includes("awesome") || lower.includes("amazing") || lower.includes("helpful") || lower.includes("fast")) {
+        defaultSentiment = "POSITIVE";
+        defaultSentimentScore = 0.9;
+        defaultFeature = "Product Delight";
+        defaultThemes = ["Feature Praise", "User Satisfaction"];
+      }
+
+      let classification = {
+        sentiment: defaultSentiment,
+        sentimentScore: defaultSentimentScore,
+        featureArea: defaultFeature,
+        themes: defaultThemes,
+        tags: ["public-portal", channel.toLowerCase()],
+        urgency: defaultUrgency,
+        aiSummary: content.slice(0, 120),
+        keyQuote: `"${content.slice(0, 90)}..."`,
+      };
+
+      // If Gemini AI is configured, run server-side classification
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          const ai = getGeminiClient();
+          const aiPrompt = `You are the LOOP AI Feedback Analyzer. Analyze this feedback submitted through the customer feedback portal:
+"${content}"
+Author: ${customerName} (${customerCompany})
+
+Output valid JSON with:
+{
+  "sentiment": "POSITIVE" | "NEUTRAL" | "NEGATIVE",
+  "sentimentScore": <number between -1.0 and 1.0>,
+  "featureArea": "<short feature category e.g. Security & SSO, Billing, Mobile App, Analytics, UX, Performance>",
+  "themes": ["<1-2 concise theme tags>"],
+  "tags": ["<2-3 keyword tags>"],
+  "urgency": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+  "aiSummary": "<1-sentence summary of the core issue or praise>",
+  "keyQuote": "<verbatim quote from the feedback enclosed in quotes>"
+}`;
+
+          const result = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: aiPrompt,
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.2,
+            },
+          });
+
+          const resText = result.text?.trim() || "{}";
+          const parsed = JSON.parse(resText);
+          if (parsed && parsed.sentiment) {
+            classification = { ...classification, ...parsed };
+          }
+        } catch (aiErr) {
+          console.warn("[LOOP Public] Gemini classification fallback used:", aiErr);
+        }
+      }
+
+      const id = `fb-pub-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const currentList = db.feedback.get(targetWorkspaceId) || [];
+
+      const newItem: FeedbackItem = {
+        id,
+        workspaceId: targetWorkspaceId,
+        title: title || `${classification.featureArea} Feedback`,
+        content,
+        customerName,
+        customerEmail,
+        customerCompany,
+        customerTier,
+        channel,
+        sentiment: classification.sentiment,
+        sentimentScore: classification.sentimentScore,
+        status: "NEW",
+        featureArea: classification.featureArea,
+        themes: classification.themes || ["Customer Submission"],
+        tags: classification.tags || ["public-portal"],
+        urgency: classification.urgency,
+        createdAt: new Date().toISOString(),
+        aiSummary: classification.aiSummary,
+        keyQuote: classification.keyQuote,
+      };
+
+      db.feedback.set(targetWorkspaceId, [newItem, ...currentList]);
+
+      res.status(201).json({
+        success: true,
+        message: "Thank you for your feedback! It has been successfully analyzed and submitted to our product team.",
+        item: newItem,
+      });
+    } catch (err: any) {
+      console.error("[LOOP Public Feedback Error]:", err);
+      res.status(500).json({ error: err.message || "Failed to submit public feedback." });
+    }
   });
 
   // Reseed Endpoint (For testing & mentor grading)
