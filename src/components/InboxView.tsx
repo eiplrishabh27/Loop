@@ -30,6 +30,12 @@ interface InboxViewProps {
   userRole: UserRole;
   onNavigateToIngest: () => void;
   totalFeedbackCount: number;
+  searchQuery?: string;
+  onSearchQueryChange?: (query: string) => void;
+  searchPriority?: string;
+  onSearchPriorityChange?: (priority: string) => void;
+  searchStatus?: string;
+  onSearchStatusChange?: (status: string) => void;
 }
 
 export const InboxView: React.FC<InboxViewProps> = ({
@@ -40,13 +46,38 @@ export const InboxView: React.FC<InboxViewProps> = ({
   userRole,
   onNavigateToIngest,
   totalFeedbackCount,
+  searchQuery: propSearchQuery,
+  onSearchQueryChange: propOnSearchQueryChange,
+  searchPriority: propSearchPriority,
+  onSearchPriorityChange: propOnSearchPriorityChange,
+  searchStatus: propSearchStatus,
+  onSearchStatusChange: propOnSearchStatusChange,
 }) => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [localSearchTerm, setLocalSearchTerm] = useState('');
+  const [localFilterUrgency, setLocalFilterUrgency] = useState<string>('ALL');
+  const [localFilterStatus, setLocalFilterStatus] = useState<string>('ALL');
+
+  const searchTerm = propSearchQuery !== undefined ? propSearchQuery : localSearchTerm;
+  const setSearchTerm = (term: string) => {
+    if (propOnSearchQueryChange) propOnSearchQueryChange(term);
+    else setLocalSearchTerm(term);
+  };
+
+  const filterUrgency = propSearchPriority !== undefined ? propSearchPriority : localFilterUrgency;
+  const setFilterUrgency = (urgency: string) => {
+    if (propOnSearchPriorityChange) propOnSearchPriorityChange(urgency);
+    else setLocalFilterUrgency(urgency);
+  };
+
+  const filterStatus = propSearchStatus !== undefined ? propSearchStatus : localFilterStatus;
+  const setFilterStatus = (status: string) => {
+    if (propOnSearchStatusChange) propOnSearchStatusChange(status);
+    else setLocalFilterStatus(status);
+  };
+
   const [filterChannel, setFilterChannel] = useState<string>('ALL');
   const [filterSentiment, setFilterSentiment] = useState<string>('ALL');
-  const [filterStatus, setFilterStatus] = useState<string>('ALL');
   const [filterTier, setFilterTier] = useState<string>('ALL');
-  const [filterUrgency, setFilterUrgency] = useState<string>('ALL');
   const [actionNotesInput, setActionNotesInput] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -91,6 +122,34 @@ export const InboxView: React.FC<InboxViewProps> = ({
       setIsUpdating(false);
     }
   };
+
+  const highlightMatch = (text: string, highlight: string) => {
+    if (!highlight || !text) return text;
+    const parts = text.split(new RegExp(`(${highlight})`, 'gi'));
+    return (
+      <>
+        {parts.map((part, i) =>
+          part.toLowerCase() === highlight.toLowerCase() ? (
+            <span key={i} className="bg-blue-500/30 text-blue-200 font-semibold px-0.5 rounded">
+              {part}
+            </span>
+          ) : (
+            part
+          )
+        )}
+      </>
+    );
+  };
+
+  // Counts for quick filter pills
+  const criticalCount = safeList.filter((i) => i.urgency === 'CRITICAL').length;
+  const highCount = safeList.filter((i) => i.urgency === 'HIGH').length;
+  const mediumCount = safeList.filter((i) => i.urgency === 'MEDIUM').length;
+  const lowCount = safeList.filter((i) => i.urgency === 'LOW').length;
+
+  const newStatusCount = safeList.filter((i) => i.status === 'NEW').length;
+  const reviewedStatusCount = safeList.filter((i) => i.status === 'REVIEWED').length;
+  const actionedStatusCount = safeList.filter((i) => i.status === 'ACTIONED').length;
 
   const getSentimentBadge = (sentiment: string) => {
     switch (sentiment) {
@@ -157,69 +216,152 @@ export const InboxView: React.FC<InboxViewProps> = ({
       </div>
 
       {/* Filter & Search Bar */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-lg backdrop-blur-sm space-y-3">
+      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xl backdrop-blur-sm space-y-4">
+        {/* Top Search Input Row */}
         <div className="flex flex-wrap items-center gap-3">
-          {/* Search Input */}
-          <div className="flex-1 min-w-[240px] relative">
+          <div className="flex-1 min-w-[260px] relative">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search content, customers, companies, themes, or tags..."
+              placeholder="Search feedback across content, customer names, companies, themes, tags..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-slate-950/80 border border-slate-700/80 rounded-xl text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+              className="w-full pl-9 pr-8 py-2.5 bg-slate-950/90 border border-slate-700/80 rounded-xl text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-inner"
             />
             {searchTerm && (
               <button
                 onClick={() => setSearchTerm('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors p-1"
+                title="Clear search text"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
 
-          {/* Quick Clear */}
-          {(filterChannel !== 'ALL' ||
-            filterSentiment !== 'ALL' ||
-            filterStatus !== 'ALL' ||
-            filterTier !== 'ALL' ||
-            filterUrgency !== 'ALL' ||
-            searchTerm) && (
-            <button
-              onClick={() => {
-                setSearchTerm('');
-                setFilterChannel('ALL');
-                setFilterSentiment('ALL');
-                setFilterStatus('ALL');
-                setFilterTier('ALL');
-                setFilterUrgency('ALL');
-              }}
-              className="text-xs text-blue-400 hover:text-blue-300 font-medium px-2 py-1"
-            >
-              Reset Filters
-            </button>
-          )}
+          {/* Active filter count & reset button */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono text-slate-400 bg-slate-950 px-2.5 py-1.5 rounded-lg border border-slate-800">
+              {filteredItems.length} matched
+            </span>
+            {(filterChannel !== 'ALL' ||
+              filterSentiment !== 'ALL' ||
+              filterStatus !== 'ALL' ||
+              filterTier !== 'ALL' ||
+              filterUrgency !== 'ALL' ||
+              searchTerm) && (
+              <button
+                onClick={() => {
+                  setSearchTerm('');
+                  setFilterChannel('ALL');
+                  setFilterSentiment('ALL');
+                  setFilterStatus('ALL');
+                  setFilterTier('ALL');
+                  setFilterUrgency('ALL');
+                }}
+                className="text-xs text-rose-400 hover:text-rose-300 font-semibold px-2.5 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 transition-all cursor-pointer"
+              >
+                Reset Filters
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Dropdown Filters Strip */}
+        {/* Quick Priority & Status Pill Tabs */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-slate-800/80">
+          {/* Priority / Urgency Filter Pills */}
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Filter by Priority (Urgency)</span>
+              {filterUrgency !== 'ALL' && (
+                <button
+                  onClick={() => setFilterUrgency('ALL')}
+                  className="text-[10px] text-blue-400 hover:underline"
+                >
+                  Clear Priority
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { id: 'ALL', label: 'All', count: safeList.length },
+                { id: 'CRITICAL', label: '🚨 Critical', count: criticalCount, activeColor: 'bg-rose-600 text-white' },
+                { id: 'HIGH', label: '⚡ High', count: highCount, activeColor: 'bg-amber-600 text-white' },
+                { id: 'MEDIUM', label: '🔷 Medium', count: mediumCount, activeColor: 'bg-blue-600 text-white' },
+                { id: 'LOW', label: '⚪ Low', count: lowCount, activeColor: 'bg-slate-700 text-white' },
+              ].map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setFilterUrgency(p.id)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 border ${
+                    filterUrgency === p.id
+                      ? p.activeColor || 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-500/20'
+                      : 'bg-slate-950/80 text-slate-300 border-slate-800 hover:bg-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <span>{p.label}</span>
+                  <span
+                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+                      filterUrgency === p.id ? 'bg-black/30 text-white' : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {p.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Workflow Status Filter Pills */}
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Filter by Status</span>
+              {filterStatus !== 'ALL' && (
+                <button
+                  onClick={() => setFilterStatus('ALL')}
+                  className="text-[10px] text-blue-400 hover:underline"
+                >
+                  Clear Status
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { id: 'ALL', label: 'All', count: safeList.length },
+                { id: 'NEW', label: '🟡 NEW', count: newStatusCount, activeColor: 'bg-amber-600 text-white' },
+                { id: 'REVIEWED', label: '🔵 REVIEWED', count: reviewedStatusCount, activeColor: 'bg-blue-600 text-white' },
+                { id: 'ACTIONED', label: '🟢 ACTIONED', count: actionedStatusCount, activeColor: 'bg-emerald-600 text-white' },
+              ].map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setFilterStatus(s.id)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 border ${
+                    filterStatus === s.id
+                      ? s.activeColor || 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-500/20'
+                      : 'bg-slate-950/80 text-slate-300 border-slate-800 hover:bg-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <span>{s.label}</span>
+                  <span
+                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+                      filterStatus === s.id ? 'bg-black/30 text-white' : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {p => s.count}
+                    {s.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Secondary Dropdown Strip: Channel, Tier, Sentiment */}
         <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80 text-xs">
           <div className="flex items-center gap-1 text-slate-400 mr-2 font-medium">
             <Filter className="w-3.5 h-3.5" />
-            <span>Filters:</span>
+            <span>More Filters:</span>
           </div>
-
-          {/* Status Filter */}
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-200 text-xs focus:outline-none focus:border-blue-500"
-          >
-            <option value="ALL">All Statuses</option>
-            <option value="NEW">Status: NEW</option>
-            <option value="REVIEWED">Status: REVIEWED</option>
-            <option value="ACTIONED">Status: ACTIONED</option>
-          </select>
 
           {/* Sentiment Filter */}
           <select
@@ -262,18 +404,28 @@ export const InboxView: React.FC<InboxViewProps> = ({
             <option value="FREE">Free</option>
           </select>
 
-          {/* Urgency */}
-          <select
-            value={filterUrgency}
-            onChange={(e) => setFilterUrgency(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-200 text-xs focus:outline-none focus:border-blue-500"
-          >
-            <option value="ALL">All Urgencies</option>
-            <option value="CRITICAL">Critical</option>
-            <option value="HIGH">High</option>
-            <option value="MEDIUM">Medium</option>
-            <option value="LOW">Low</option>
-          </select>
+          {/* Quick Presets */}
+          <div className="flex items-center gap-1 ml-auto text-[11px]">
+            <span className="text-slate-500 hidden xl:inline">Presets:</span>
+            <button
+              onClick={() => {
+                setFilterUrgency('CRITICAL');
+                setFilterStatus('NEW');
+              }}
+              className="px-2 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20 transition-colors"
+            >
+              🚨 Critical Triage
+            </button>
+            <button
+              onClick={() => {
+                setFilterTier('ENTERPRISE');
+                setFilterSentiment('NEGATIVE');
+              }}
+              className="px-2 py-0.5 rounded bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border border-blue-500/20 transition-colors"
+            >
+              🏢 Enterprise Friction
+            </button>
+          </div>
         </div>
       </div>
 
@@ -336,23 +488,25 @@ export const InboxView: React.FC<InboxViewProps> = ({
 
                         {/* Title */}
                         <h4 className="text-sm font-bold text-slate-100 group-hover:text-blue-300 transition-colors">
-                          {item.title}
+                          {highlightMatch(item.title, searchTerm)}
                         </h4>
 
                         {/* Content Snippet */}
                         <p className="text-xs text-slate-300 line-clamp-2 leading-relaxed">
-                          {item.content}
+                          {highlightMatch(item.content, searchTerm)}
                         </p>
 
                         {/* Customer & Timestamp Bar */}
                         <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400 pt-1">
                           <span className="font-semibold text-slate-300">
-                            {item.customerName}
+                            {highlightMatch(item.customerName, searchTerm)}
                           </span>
                           {item.customerCompany && (
                             <>
                               <span className="text-slate-600">•</span>
-                              <span className="text-slate-300">{item.customerCompany}</span>
+                              <span className="text-slate-300">
+                                {highlightMatch(item.customerCompany, searchTerm)}
+                              </span>
                             </>
                           )}
                           <span className="text-slate-600">•</span>

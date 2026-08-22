@@ -67,6 +67,11 @@ export default function App() {
   const [reports, setReports] = useState<VoCReport[]>([]);
   const [selectedFeedbackItem, setSelectedFeedbackItem] = useState<FeedbackItem | null>(null);
 
+  // Global Search & Filter State (Omnipresent filtering across keyword, priority, and status)
+  const [globalSearchQuery, setGlobalSearchQuery] = useState<string>('');
+  const [globalSearchPriority, setGlobalSearchPriority] = useState<string>('ALL');
+  const [globalSearchStatus, setGlobalSearchStatus] = useState<string>('ALL');
+
   // Status & Loading State
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -372,6 +377,14 @@ export default function App() {
         totalFeedbackCount={feedbackList.length}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onLogout={handleLogout}
+        feedbackList={feedbackList}
+        searchQuery={globalSearchQuery}
+        onSearchQueryChange={setGlobalSearchQuery}
+        searchPriority={globalSearchPriority}
+        onSearchPriorityChange={setGlobalSearchPriority}
+        searchStatus={globalSearchStatus}
+        onSearchStatusChange={setGlobalSearchStatus}
+        onSelectFeedbackItem={handleSelectFeedbackAndNavigate}
       />
 
       {/* Floating Toast Notification */}
@@ -488,6 +501,12 @@ export default function App() {
                 userRole={userRole}
                 onNavigateToIngest={() => setActiveTab('ingest')}
                 totalFeedbackCount={feedbackList.length}
+                searchQuery={globalSearchQuery}
+                onSearchQueryChange={setGlobalSearchQuery}
+                searchPriority={globalSearchPriority}
+                onSearchPriorityChange={setGlobalSearchPriority}
+                searchStatus={globalSearchStatus}
+                onSearchStatusChange={setGlobalSearchStatus}
               />
             )}
 
@@ -511,6 +530,7 @@ export default function App() {
                 onRecluster={handleRecluster}
                 userRole={userRole}
                 onFilterByTheme={(themeName) => {
+                  setGlobalSearchQuery(themeName);
                   setActiveTab('inbox');
                 }}
               />

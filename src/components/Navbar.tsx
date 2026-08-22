@@ -22,7 +22,8 @@ import {
   LogOut,
   KeyRound,
 } from 'lucide-react';
-import { Workspace, User, UserRole } from '../types/loop';
+import { Workspace, User, UserRole, FeedbackItem } from '../types/loop';
+import { GlobalSearchBar } from './GlobalSearchBar';
 
 interface NavbarProps {
   currentTab?: string;
@@ -42,6 +43,14 @@ interface NavbarProps {
   totalFeedbackCount?: number;
   onOpenAuthModal?: () => void;
   onLogout?: () => void;
+  feedbackList?: FeedbackItem[];
+  searchQuery?: string;
+  onSearchQueryChange?: (query: string) => void;
+  searchPriority?: string;
+  onSearchPriorityChange?: (priority: string) => void;
+  searchStatus?: string;
+  onSearchStatusChange?: (status: string) => void;
+  onSelectFeedbackItem?: (item: FeedbackItem) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -62,6 +71,14 @@ export const Navbar: React.FC<NavbarProps> = ({
   totalFeedbackCount = 0,
   onOpenAuthModal,
   onLogout,
+  feedbackList = [],
+  searchQuery = '',
+  onSearchQueryChange = () => {},
+  searchPriority = 'ALL',
+  onSearchPriorityChange = () => {},
+  searchStatus = 'ALL',
+  onSearchStatusChange = () => {},
+  onSelectFeedbackItem = () => {},
 }) => {
   const [showWsMenu, setShowWsMenu] = useState(false);
   const [showRoleMenu, setShowRoleMenu] = useState(false);
@@ -161,6 +178,26 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Global Search Bar (Omnipresent Feedback Search) */}
+          <div className="flex-1 max-w-md mx-2 hidden md:block">
+            <GlobalSearchBar
+              feedbackList={feedbackList}
+              searchQuery={searchQuery}
+              onSearchQueryChange={onSearchQueryChange}
+              searchPriority={searchPriority}
+              onSearchPriorityChange={onSearchPriorityChange}
+              searchStatus={searchStatus}
+              onSearchStatusChange={onSearchStatusChange}
+              onSelectFeedbackItem={(item) => {
+                onSelectFeedbackItem(item);
+                handleSelectTab('inbox');
+              }}
+              onNavigateToInbox={() => handleSelectTab('inbox')}
+              compact={true}
+              placeholder="Quick search feedback (keyword, priority, status)..."
+            />
           </div>
 
           {/* Right Action Tools: Simulated Stream, Role Switcher, Reseed & Auth */}
