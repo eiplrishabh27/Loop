@@ -1,0 +1,8 @@
+{
+  "name": "Project LOOP - AI Feedback Intelligence Platform",
+  "description": "Multi-tenant AI feedback intelligence platform that turns scattered customer feedback into a ranked, evidence-backed list of what to do next with automated classification, theme clustering, grounded Q&A, and Voice-of-Customer reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
+
