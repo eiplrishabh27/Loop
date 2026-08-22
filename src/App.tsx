@@ -9,6 +9,7 @@ import { VoCReportsView } from './components/VoCReportsView';
 import { WorkspaceTeamView } from './components/WorkspaceTeamView';
 import { PublicFeedbackPortal } from './components/PublicFeedbackPortal';
 import { AuthModal } from './components/AuthModal';
+import { LoginScreen } from './components/LoginScreen';
 import {
   Workspace,
   UserProfile,
@@ -23,13 +24,17 @@ import { SEED_WORKSPACES, SEED_USERS } from './data/seedData';
 import { Loader2, AlertCircle, Sparkles, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
-  // Navigation State (Detect /feedback from hash or path if present)
+  // Navigation State (Detect /feedback or auth default)
   const [activeTab, setActiveTab] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const path = window.location.pathname.toLowerCase();
       const hash = window.location.hash.toLowerCase();
       if (path.includes('feedback') || hash.includes('feedback')) {
         return 'public-feedback';
+      }
+      const stored = localStorage.getItem('loop_user');
+      if (!stored) {
+        return 'auth';
       }
     }
     return 'dashboard';
@@ -47,7 +52,7 @@ export default function App() {
         }
       }
     }
-    return SEED_USERS[0];
+    return null;
   });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
@@ -154,6 +159,8 @@ export default function App() {
       setCurrentWorkspace(workspace);
       fetchWorkspaceData(workspace.id);
     }
+    setIsAuthModalOpen(false);
+    setActiveTab('dashboard');
     showToast(`Signed in as ${user.name} (${user.role})`, 'success');
   };
 
@@ -161,8 +168,8 @@ export default function App() {
   const handleLogout = () => {
     setCurrentUser(null);
     setUserRole('VIEWER');
+    setActiveTab('auth');
     showToast('Signed out of session.', 'info');
-    setIsAuthModalOpen(true);
   };
 
   // Handle Workspace Creation
@@ -422,6 +429,19 @@ export default function App() {
           </div>
         ) : (
           <div>
+            {/* View: Authentication Window (Sign In & Register) */}
+            {(activeTab === 'auth' || (!currentUser && activeTab !== 'public-feedback')) && (
+              <LoginScreen
+                onLoginSuccess={handleLoginSuccess}
+                onOpenPublicFeedback={() => {
+                  setActiveTab('public-feedback');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                workspaces={workspaces}
+                currentWorkspace={currentWorkspace}
+              />
+            )}
+
             {/* View: Public Customer Feedback Submission Portal (/feedback) */}
             {activeTab === 'public-feedback' && (
               <PublicFeedbackPortal
@@ -438,7 +458,7 @@ export default function App() {
             )}
 
             {/* View 1: Analytics Dashboard */}
-            {activeTab === 'dashboard' && (
+            {currentUser && activeTab === 'dashboard' && (
               <DashboardView
                 workspace={currentWorkspace}
                 feedbackList={feedbackList}
@@ -459,7 +479,7 @@ export default function App() {
             )}
 
             {/* View 2: Feedback Inbox */}
-            {activeTab === 'inbox' && (
+            {currentUser && activeTab === 'inbox' && (
               <InboxView
                 feedbackList={feedbackList}
                 selectedItem={selectedFeedbackItem}
@@ -472,7 +492,7 @@ export default function App() {
             )}
 
             {/* View 3: Ingest Data */}
-            {activeTab === 'ingest' && (
+            {currentUser && activeTab === 'ingest' && (
               <IngestView
                 workspaceId={currentWorkspace.id}
                 userRole={userRole}
@@ -485,7 +505,7 @@ export default function App() {
             )}
 
             {/* View 4: Theme Trends */}
-            {activeTab === 'themes' && (
+            {currentUser && activeTab === 'themes' && (
               <ThemeTrendsView
                 themes={themes}
                 onRecluster={handleRecluster}
@@ -497,7 +517,7 @@ export default function App() {
             )}
 
             {/* View 5: Ask LOOP (Grounded RAG) */}
-            {activeTab === 'ask' && (
+            {currentUser && activeTab === 'ask' && (
               <AskLoopView
                 workspaceId={currentWorkspace.id}
                 onSelectFeedbackItem={handleSelectFeedbackAndNavigate}
@@ -505,7 +525,7 @@ export default function App() {
             )}
 
             {/* View 6: VoC Intelligence Digest Reports */}
-            {activeTab === 'reports' && (
+            {currentUser && activeTab === 'reports' && (
               <VoCReportsView
                 reports={reports}
                 onGenerateReport={handleGenerateReport}
@@ -514,7 +534,7 @@ export default function App() {
             )}
 
             {/* View 7: Workspaces & Governance */}
-            {activeTab === 'workspaces' && (
+            {currentUser && activeTab === 'workspaces' && (
               <WorkspaceTeamView
                 workspaces={workspaces}
                 currentWorkspace={currentWorkspace}

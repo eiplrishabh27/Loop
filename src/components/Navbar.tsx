@@ -20,6 +20,7 @@ import {
   LogIn,
   User as UserIcon,
   LogOut,
+  KeyRound,
 } from 'lucide-react';
 import { Workspace, User, UserRole } from '../types/loop';
 
@@ -91,6 +92,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'ask', label: 'Ask LOOP (AI)', icon: MessageSquareText },
     { id: 'reports', label: 'VoC Reports', icon: FileText },
     { id: 'workspaces', label: 'Workspace & RBAC', icon: Users },
+    { id: 'auth', label: 'Sign In / Register', icon: KeyRound, isAuthTab: true },
   ];
 
   const roleColors: Record<UserRole, { badge: string; text: string }> = {
@@ -261,6 +263,16 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <div className="text-[10px] text-slate-400 truncate">{currentUser.email}</div>
                       <div className="text-[10px] text-blue-400 mt-0.5">{currentUser.title || currentUser.role}</div>
                     </div>
+                    <button
+                      onClick={() => {
+                        handleSelectTab('auth');
+                        setShowUserMenu(false);
+                      }}
+                      className="w-full flex items-center gap-2 p-2 rounded-lg text-left text-xs text-slate-300 hover:bg-slate-800 cursor-pointer transition-colors"
+                    >
+                      <KeyRound className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Authentication Window</span>
+                    </button>
                     {onOpenAuthModal && (
                       <button
                         onClick={() => {
@@ -270,7 +282,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                         className="w-full flex items-center gap-2 p-2 rounded-lg text-left text-xs text-slate-300 hover:bg-slate-800 cursor-pointer transition-colors"
                       >
                         <UserIcon className="w-3.5 h-3.5 text-blue-400" />
-                        <span>Switch Account / Sign In</span>
+                        <span>Switch Account / Modal</span>
                       </button>
                     )}
                     {onLogout && (
@@ -290,7 +302,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             ) : (
               <button
-                onClick={onOpenAuthModal}
+                onClick={() => handleSelectTab('auth')}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-md shadow-blue-500/20 transition-all cursor-pointer"
               >
                 <LogIn className="w-3.5 h-3.5" />
@@ -316,6 +328,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                     ? 'bg-blue-600 text-white shadow-md shadow-blue-500/25'
                     : item.highlight
                     ? 'text-cyan-300 bg-cyan-950/40 border border-cyan-700/40 hover:bg-cyan-900/50'
+                    : item.isAuthTab
+                    ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 ml-auto border border-slate-800'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                 }`}
               >
