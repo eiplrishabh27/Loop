@@ -583,7 +583,7 @@ export default function App() {
               Public Feedback Portal (/feedback)
             </button>
             <span>•</span>
-            <span>Powered by Gemini AI • Multi-Tenant Architecture</span>
+            <span>Enterprise Feedback Intelligence • Multi-Tenant Architecture</span>
           </div>
         </div>
       </footer>

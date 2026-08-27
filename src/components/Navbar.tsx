@@ -73,19 +73,25 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLogout,
   feedbackList = [],
   searchQuery = '',
-  onSearchQueryChange = () => {},
+  onSearchQueryChange = (_query: string) => {},
   searchPriority = 'ALL',
-  onSearchPriorityChange = () => {},
+  onSearchPriorityChange = (_priority: string) => {},
   searchStatus = 'ALL',
-  onSearchStatusChange = () => {},
-  onSelectFeedbackItem = () => {},
+  onSearchStatusChange = (_status: string) => {},
+  onSelectFeedbackItem = (_item: FeedbackItem) => {},
 }) => {
   const [showWsMenu, setShowWsMenu] = useState(false);
   const [showRoleMenu, setShowRoleMenu] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
   const selectedTab = currentTab || activeTab || 'dashboard';
-  const handleSelectTab = onSelectTab || onTabChange || (() => {});
+  const handleSelectTab = (tab: string) => {
+    if (typeof onSelectTab === 'function') {
+      onSelectTab(tab);
+    } else if (typeof onTabChange === 'function') {
+      onTabChange(tab);
+    }
+  };
   const effectiveRole: UserRole = propUserRole || currentUser?.role || 'ADMIN';
   const handleRoleChange = onSwitchRole || onChangeUserRole || (() => {});
 
