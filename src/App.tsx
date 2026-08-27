@@ -248,14 +248,19 @@ export default function App() {
   };
 
   // Handle Bulk CSV Ingest
-  const handleBulkIngest = async (rows: any[]) => {
+  const handleBulkIngest = async (rows: any[], options?: { deduplicationMode?: string; similarityThreshold?: number; skipDuplicates?: boolean }) => {
     const res = await fetch(`/api/workspaces/${currentWorkspace.id}/feedback/bulk`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-user-role': userRole,
       },
-      body: JSON.stringify({ items: rows }),
+      body: JSON.stringify({
+        items: rows,
+        deduplicationMode: options?.deduplicationMode || 'skip',
+        similarityThreshold: options?.similarityThreshold ?? 0.88,
+        skipDuplicates: options?.skipDuplicates ?? true,
+      }),
     });
 
     if (!res.ok) {
@@ -265,7 +270,11 @@ export default function App() {
 
     const result = await res.json();
     fetchWorkspaceData(currentWorkspace.id);
-    showToast(`Bulk imported ${result.count} tickets!`, 'success');
+    const skippedCount = result.duplicatesSkipped || 0;
+    const msg = skippedCount > 0
+      ? `Bulk imported ${result.count} tickets (${skippedCount} duplicates skipped)!`
+      : `Bulk imported ${result.count} tickets!`;
+    showToast(msg, 'success');
     return result;
   };
 

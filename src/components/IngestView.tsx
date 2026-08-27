@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   PlusCircle,
   FileSpreadsheet,
@@ -19,6 +19,10 @@ import {
   Mail,
   UserCheck,
   Check,
+  ShieldAlert,
+  ShieldCheck,
+  Sliders,
+  RefreshCw,
 } from 'lucide-react';
 import { FeedbackChannel, CustomerTier, UrgencyLevel, UserRole } from '../types/loop';
 
@@ -26,7 +30,7 @@ interface IngestViewProps {
   workspaceId: string;
   userRole: UserRole;
   onSingleIngest: (data: any) => Promise<any>;
-  onBulkIngest: (rows: any[]) => Promise<any>;
+  onBulkIngest: (rows: any[], options?: any) => Promise<any>;
   onSimulateChannel: (channel: string) => Promise<any>;
   onSuccessNavigate: () => void;
   onChangeUserRole?: (role: UserRole) => void;
@@ -57,6 +61,19 @@ export const IngestView: React.FC<IngestViewProps> = ({
   const [lastIngestedItem, setLastIngestedItem] = useState<any | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Deduplication & Similarity Radar State (Single Ingest)
+  const [enableDuplicateCheck, setEnableDuplicateCheck] = useState(true);
+  const [deduplicationMode, setDeduplicationMode] = useState<'flag' | 'reject' | 'merge' | 'allow'>('flag');
+  const [similarityThreshold, setSimilarityThreshold] = useState<number>(0.88);
+  const [preCheckLoading, setPreCheckLoading] = useState(false);
+  const [preCheckResult, setPreCheckResult] = useState<{
+    isDuplicate: boolean;
+    matchType: string;
+    similarityScore: number;
+    matchedItem?: { id: string; title: string; content?: string };
+    contentHash?: string;
+  } | null>(null);
+
   // Bulk CSV State
   const [csvText, setCsvText] = useState('');
   const [parsedRows, setParsedRows] = useState<any[]>([]);
@@ -64,10 +81,52 @@ export const IngestView: React.FC<IngestViewProps> = ({
   const [fileName, setFileName] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [bulkDeduplicationMode, setBulkDeduplicationMode] = useState<'skip' | 'flag' | 'allow'>('skip');
+  const [bulkSimilarityThreshold, setBulkSimilarityThreshold] = useState<number>(0.88);
 
   // Simulated Feed State
   const [selectedChannel, setSelectedChannel] = useState<string>('ZENDESK');
   const [isSimulating, setIsSimulating] = useState(false);
+
+  // Real-time Debounced Duplicate Pre-Check Radar for Single Ingest
+  useEffect(() => {
+    if (!enableDuplicateCheck || activeTab !== 'single' || !content.trim() || content.trim().length < 15) {
+      setPreCheckResult(null);
+      setPreCheckLoading(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setPreCheckLoading(true);
+      try {
+        const res = await fetch(`/api/workspaces/${workspaceId}/feedback/check-duplicate`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-role': userRole,
+          },
+          body: JSON.stringify({
+            content: content.trim(),
+            title: title.trim(),
+            customerCompany: customerCompany.trim(),
+            customerName: customerName.trim(),
+            similarityThreshold,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          setPreCheckResult(data);
+        }
+      } catch (err) {
+        console.warn('Real-time duplicate check error:', err);
+      } finally {
+        setPreCheckLoading(false);
+      }
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [content, title, customerCompany, customerName, similarityThreshold, enableDuplicateCheck, activeTab, workspaceId, userRole]);
 
   // Preset quick fill templates for Single Manual Entry
   const singlePresets = [
@@ -172,15 +231,26 @@ Love the instant search bar,The instant filter and keyword tags make triage supe
         customerTier,
         channel,
         urgency,
+        checkDuplicates: enableDuplicateCheck,
+        deduplicationMode,
+        similarityThreshold,
       });
 
       setLastIngestedItem(created);
-      setSuccessMessage(`Feedback item "${created?.title || title || 'New Feedback'}" successfully ingested & classified by Gemini!`);
+      const dupInfo = created?.deduplication;
+      if (dupInfo?.isDuplicate) {
+        setSuccessMessage(
+          `Feedback ingested & flagged as duplicate of #${dupInfo.matchedItem?.id} (${Math.round((dupInfo.similarityScore || 0) * 100)}% match)!`
+        );
+      } else {
+        setSuccessMessage(`Feedback item "${created?.title || title || 'New Feedback'}" successfully ingested & classified by Gemini!`);
+      }
       setTitle('');
       setContent('');
       setCustomerName('');
       setCustomerEmail('');
       setCustomerCompany('');
+      setPreCheckResult(null);
     } catch (err: any) {
       console.error('Ingest error:', err);
       setErrorMessage(err.message || 'Failed to ingest feedback item. Please check server connection.');
@@ -314,8 +384,16 @@ Love the instant search bar,The instant filter and keyword tags make triage supe
     setSuccessMessage(null);
 
     try {
-      const result = await onBulkIngest(rowsToSubmit);
-      setSuccessMessage(`Successfully imported ${result?.count || rowsToSubmit.length} feedback items into workspace!`);
+      const result = await onBulkIngest(rowsToSubmit, {
+        deduplicationMode: bulkDeduplicationMode,
+        similarityThreshold: bulkSimilarityThreshold,
+        skipDuplicates: bulkDeduplicationMode === 'skip',
+      });
+      const dupCount = result?.duplicatesSkipped || result?.duplicatesFlagged || 0;
+      const dupMsg = dupCount > 0
+        ? ` (${dupCount} duplicate item${dupCount === 1 ? '' : 's'} ${bulkDeduplicationMode === 'skip' ? 'skipped' : 'flagged'})`
+        : '';
+      setSuccessMessage(`Successfully imported ${result?.count || rowsToSubmit.length} feedback items into workspace${dupMsg}!`);
       setParsedRows([]);
       setCsvText('');
       setFileName(null);
@@ -608,6 +686,97 @@ Love the instant search bar,The instant filter and keyword tags make triage supe
               />
             </div>
 
+            {/* Real-time Deduplication Radar & Policy Card */}
+            <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-amber-400 font-bold text-xs flex items-center gap-1.5">
+                    <RefreshCw className={`w-3.5 h-3.5 ${preCheckLoading ? 'animate-spin text-blue-400' : ''}`} />
+                    <span>Deduplication & Similarity Radar</span>
+                  </span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableDuplicateCheck}
+                      onChange={(e) => setEnableDuplicateCheck(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-8 h-4 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-3 after:w-3.5 after:transition-all peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Threshold: <strong className="text-slate-200">{Math.round(similarityThreshold * 100)}%</strong>
+                </div>
+              </div>
+
+              {enableDuplicateCheck && (
+                <>
+                  {/* Live Radar Scan Status Banner */}
+                  {preCheckLoading && (
+                    <div className="p-2.5 rounded-lg bg-blue-950/40 border border-blue-800/40 text-blue-300 text-[11px] flex items-center gap-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      <span>Scanning vector index for content collisions & semantic similarity...</span>
+                    </div>
+                  )}
+
+                  {!preCheckLoading && preCheckResult?.isDuplicate && (
+                    <div className="p-3 rounded-lg bg-amber-950/40 border border-amber-600/50 text-amber-200 text-xs space-y-1">
+                      <div className="flex items-center gap-1.5 font-bold text-amber-300">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>Duplicate Match Detected ({Math.round((preCheckResult.similarityScore || 0) * 100)}% match)</span>
+                      </div>
+                      <div className="text-[11px] text-amber-300/90">
+                        Matches ticket <strong className="text-slate-100">#{preCheckResult.matchedItem?.id}</strong>: "{preCheckResult.matchedItem?.title}" via{' '}
+                        <span className="font-mono">{preCheckResult.matchType === 'EXACT_HASH' ? 'SHA-256 Hash' : 'Vector Cosine Distance'}</span>.
+                      </div>
+                    </div>
+                  )}
+
+                  {!preCheckLoading && preCheckResult && !preCheckResult.isDuplicate && content.trim().length >= 15 && (
+                    <div className="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-800/40 text-emerald-300 text-[11px] flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>Content Fingerprint Unique — No duplicate collisions detected in workspace.</span>
+                    </div>
+                  )}
+
+                  {/* Mode & Threshold Selectors */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 block mb-1">
+                        Collision Ingestion Policy:
+                      </label>
+                      <select
+                        value={deduplicationMode}
+                        onChange={(e) => setDeduplicationMode(e.target.value as any)}
+                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="flag">🏷️ Flag Duplicate (Store with reference)</option>
+                        <option value="reject">🛑 Strict Rejection (HTTP 409 error)</option>
+                        <option value="merge">🔀 Merge / Link Instances</option>
+                        <option value="allow">🔓 Allow All (Bypass check)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between text-[11px] font-medium text-slate-400 mb-1">
+                        <span>Similarity Cutoff:</span>
+                        <span className="font-mono text-slate-200">{similarityThreshold}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.70"
+                        max="0.98"
+                        step="0.01"
+                        value={similarityThreshold}
+                        onChange={(e) => setSimilarityThreshold(parseFloat(e.target.value))}
+                        className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
             <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-900/40 text-blue-300 text-xs flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-blue-400 shrink-0" />
               <span>
@@ -735,6 +904,52 @@ Love the instant search bar,The instant filter and keyword tags make triage supe
             />
           </div>
 
+          {/* Bulk Deduplication Controls */}
+          <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-bold text-amber-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-amber-400" />
+                <span>Bulk Ingestion Deduplication Policy</span>
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Vector Threshold: <strong className="text-slate-200">{Math.round(bulkSimilarityThreshold * 100)}%</strong>
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="text-[11px] font-medium text-slate-400 block mb-1">
+                  Deduplication Action:
+                </label>
+                <select
+                  value={bulkDeduplicationMode}
+                  onChange={(e) => setBulkDeduplicationMode(e.target.value as any)}
+                  className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="skip">🛡️ Skip Duplicates (Recommended - Clean Import)</option>
+                  <option value="flag">🏷️ Flag Duplicates (Import and Link Parent)</option>
+                  <option value="allow">🔓 Allow All (Bypass Vector Deduplication)</option>
+                </select>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between text-[11px] font-medium text-slate-400 mb-1">
+                  <span>Cosine Similarity Threshold:</span>
+                  <span className="font-mono text-slate-200">{bulkSimilarityThreshold}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.70"
+                  max="0.98"
+                  step="0.01"
+                  value={bulkSimilarityThreshold}
+                  onChange={(e) => setBulkSimilarityThreshold(parseFloat(e.target.value))}
+                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                />
+              </div>
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
@@ -755,7 +970,7 @@ Love the instant search bar,The instant filter and keyword tags make triage supe
                 {isBulkSubmitting ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Importing {parsedRows.length} rows...</span>
+                    <span>Importing & Deduplicating {parsedRows.length} rows...</span>
                   </>
                 ) : (
                   <>

@@ -78,6 +78,7 @@ export const InboxView: React.FC<InboxViewProps> = ({
   const [filterChannel, setFilterChannel] = useState<string>('ALL');
   const [filterSentiment, setFilterSentiment] = useState<string>('ALL');
   const [filterTier, setFilterTier] = useState<string>('ALL');
+  const [filterDuplicate, setFilterDuplicate] = useState<string>('ALL'); // 'ALL' | 'DUPLICATE' | 'UNIQUE'
   const [actionNotesInput, setActionNotesInput] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -109,8 +110,12 @@ export const InboxView: React.FC<InboxViewProps> = ({
     const matchesStatus = filterStatus === 'ALL' || item.status === filterStatus;
     const matchesTier = filterTier === 'ALL' || item.customerTier === filterTier;
     const matchesUrgency = filterUrgency === 'ALL' || item.urgency === filterUrgency;
+    const matchesDuplicate =
+      filterDuplicate === 'ALL' ||
+      (filterDuplicate === 'DUPLICATE' && item.isDuplicate) ||
+      (filterDuplicate === 'UNIQUE' && !item.isDuplicate);
 
-    return matchesSearch && matchesChannel && matchesSentiment && matchesStatus && matchesTier && matchesUrgency;
+    return matchesSearch && matchesChannel && matchesSentiment && matchesStatus && matchesTier && matchesUrgency && matchesDuplicate;
   });
 
   const handleStatusChange = async (newStatus: FeedbackStatus) => {
@@ -347,7 +352,6 @@ export const InboxView: React.FC<InboxViewProps> = ({
                       filterStatus === s.id ? 'bg-black/30 text-white' : 'bg-slate-800 text-slate-400'
                     }`}
                   >
-                    {p => s.count}
                     {s.count}
                   </span>
                 </button>
@@ -404,6 +408,17 @@ export const InboxView: React.FC<InboxViewProps> = ({
             <option value="FREE">Free</option>
           </select>
 
+          {/* Deduplication Filter */}
+          <select
+            value={filterDuplicate}
+            onChange={(e) => setFilterDuplicate(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-200 text-xs focus:outline-none focus:border-blue-500"
+          >
+            <option value="ALL">All Duplication States</option>
+            <option value="DUPLICATE">Duplicates Only (Flagged)</option>
+            <option value="UNIQUE">Unique Records Only</option>
+          </select>
+
           {/* Quick Presets */}
           <div className="flex items-center gap-1 ml-auto text-[11px]">
             <span className="text-slate-500 hidden xl:inline">Presets:</span>
@@ -425,6 +440,14 @@ export const InboxView: React.FC<InboxViewProps> = ({
             >
               🏢 Enterprise Friction
             </button>
+            <button
+              onClick={() => {
+                setFilterDuplicate('DUPLICATE');
+              }}
+              className="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/20 transition-colors"
+            >
+              🔄 Duplicates
+            </button>
           </div>
         </div>
       </div>
@@ -438,7 +461,7 @@ export const InboxView: React.FC<InboxViewProps> = ({
               <MessageSquare className="w-10 h-10 text-slate-600 mx-auto mb-3" />
               <h3 className="text-base font-bold text-slate-200">No Feedback Matches Current Filters</h3>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                Try clearing your search query or adjusting your channel, sentiment, or urgency filters.
+                Try clearing your search query or adjusting your channel, sentiment, urgency, or duplicate filters.
               </p>
             </div>
           ) : (
@@ -478,6 +501,14 @@ export const InboxView: React.FC<InboxViewProps> = ({
                           >
                             {item.urgency}
                           </span>
+                          {item.isDuplicate && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1">
+                              <span>🔄 Duplicate</span>
+                              {item.duplicateSimilarityScore ? (
+                                <span>({Math.round(item.duplicateSimilarityScore * 100)}%)</span>
+                              ) : null}
+                            </span>
+                          )}
                           <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
                             {item.channel}
                           </span>
@@ -669,6 +700,71 @@ export const InboxView: React.FC<InboxViewProps> = ({
                   </span>
                 ))}
               </div>
+            </div>
+
+            {/* Deduplication & Vector Intelligence Block */}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-300">
+                <span className="flex items-center gap-1.5">
+                  <span className="text-amber-400">🔄</span>
+                  <span>Deduplication & Vector Intelligence</span>
+                </span>
+                {selectedItem.isDuplicate ? (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    Flagged Duplicate
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                    Unique Record
+                  </span>
+                )}
+              </div>
+
+              {selectedItem.contentHash && (
+                <div className="text-[11px] text-slate-400 font-mono break-all bg-slate-900/90 p-2 rounded border border-slate-800">
+                  <span className="text-slate-500 select-none">SHA-256 Hash: </span>
+                  <span className="text-slate-300">{selectedItem.contentHash}</span>
+                </div>
+              )}
+
+              {selectedItem.isDuplicate && (
+                <div className="space-y-1.5 text-[11px] bg-amber-950/30 border border-amber-800/40 p-3 rounded-lg text-amber-200">
+                  <div>
+                    <strong>Match Type: </strong>
+                    <span className="font-mono">{selectedItem.duplicateType || 'SEMANTIC_SIMILARITY'}</span>
+                    {selectedItem.duplicateSimilarityScore ? (
+                      <span className="ml-1 text-amber-300 font-semibold">
+                        ({Math.round(selectedItem.duplicateSimilarityScore * 100)}% similarity)
+                      </span>
+                    ) : null}
+                  </div>
+                  {selectedItem.duplicateOfId && (
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="truncate">
+                        Matched Parent: <strong className="text-slate-200">#{selectedItem.duplicateOfId}</strong>
+                        {selectedItem.duplicateOfTitle ? ` - "${selectedItem.duplicateOfTitle}"` : ''}
+                      </span>
+                      {feedbackList.some((f) => f.id === selectedItem.duplicateOfId) && (
+                        <button
+                          onClick={() => {
+                            const parent = feedbackList.find((f) => f.id === selectedItem.duplicateOfId);
+                            if (parent) onSelectItem(parent);
+                          }}
+                          className="px-2 py-0.5 text-[10px] font-semibold bg-amber-600/40 hover:bg-amber-600/60 text-amber-100 rounded border border-amber-500/40 transition-colors shrink-0 ml-2"
+                        >
+                          View Original
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {selectedItem.duplicateCount && selectedItem.duplicateCount > 1 && (
+                <div className="text-[11px] text-blue-300 bg-blue-950/40 border border-blue-800/40 p-2.5 rounded-lg">
+                  ℹ️ This item has <strong>{selectedItem.duplicateCount} merged customer submission instances</strong>.
+                </div>
+              )}
             </div>
 
             {/* Customer Metadata Profile */}

@@ -61,6 +61,29 @@ export interface FeedbackItem {
   actionNotes?: string;
   actionedBy?: string;
   actionedAt?: string;
+  // Deduplication Metadata
+  contentHash?: string;
+  isDuplicate?: boolean;
+  duplicateOfId?: string;
+  duplicateOfTitle?: string;
+  duplicateSimilarityScore?: number;
+  duplicateType?: 'EXACT_HASH' | 'SEMANTIC_SIMILARITY';
+  duplicateCount?: number;
+}
+
+export interface DeduplicationResult {
+  isDuplicate: boolean;
+  matchType: 'EXACT_HASH' | 'SEMANTIC_SIMILARITY' | 'NONE';
+  similarityScore: number;
+  matchedItem?: FeedbackItem;
+  contentHash: string;
+  reason?: string;
+}
+
+export interface IngestionOptions {
+  checkDuplicates?: boolean;
+  deduplicationMode?: 'flag' | 'reject' | 'allow' | 'merge';
+  similarityThreshold?: number; // e.g. 0.88
 }
 
 export interface ThemeItem {
@@ -132,12 +155,33 @@ export interface VoCReport {
 export interface GroundedSource {
   id: string;
   customerName: string;
+  customerCompany?: string;
   customerTier: string;
   channel: FeedbackChannel;
   snippet: string;
   sentiment: SentimentType;
   featureArea: string;
+  urgency?: UrgencyLevel;
   createdAt: string;
+  similarityScore?: number;
+}
+
+export interface RetrievalStats {
+  vectorCount: number;
+  latencyMs: number;
+  model: string;
+  searchMode: string;
+  avgSimilarity: number;
+}
+
+export interface VectorIndexStatus {
+  workspaceId: string;
+  totalDocuments: number;
+  totalVectors: number;
+  dimension: number;
+  model: string;
+  cacheHits: number;
+  lastIndexedAt: string;
 }
 
 export interface ChatMessage {
@@ -147,4 +191,6 @@ export interface ChatMessage {
   timestamp: string;
   sources?: GroundedSource[];
   suggestedFollowups?: string[];
+  retrievalMode?: string;
+  retrievalLatencyMs?: number;
 }

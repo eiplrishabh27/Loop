@@ -14,6 +14,7 @@ import {
   CustomerTier,
   FeedbackChannel,
   UrgencyLevel,
+  DeduplicationResult,
 } from "./src/types/loop";
 import {
   SEED_WORKSPACES,
@@ -22,6 +23,7 @@ import {
   SEED_VOC_REPORT,
   generateSeedFeedback,
 } from "./src/data/seedData";
+import { vectorEngine, computeContentHash } from "./src/lib/vectorEngine";
 
 dotenv.config();
 
@@ -57,11 +59,23 @@ const db: TenantStore = {
   reports: new Map(),
 };
 
-// Initialize DB with seed data
-function initializeDatabase() {
-  SEED_WORKSPACES.forEach((ws) => {
+// Initialize DB with seed data and Vector Store
+async function initializeDatabase() {
+  let geminiClient: GoogleGenAI | undefined;
+  try {
+    if (process.env.GEMINI_API_KEY) {
+      geminiClient = getGeminiClient();
+    }
+  } catch (e) {
+    // optional during cold startup
+  }
+
+  for (const ws of SEED_WORKSPACES) {
     db.workspaces.set(ws.id, ws);
-    const feedbackList = generateSeedFeedback(ws.id);
+    const feedbackList = generateSeedFeedback(ws.id).map((item) => ({
+      ...item,
+      contentHash: item.contentHash || computeContentHash(item.content, item.customerCompany),
+    }));
     db.feedback.set(ws.id, feedbackList);
 
     // Deep clone themes for workspace
@@ -71,18 +85,23 @@ function initializeDatabase() {
     // Deep clone report
     const wsReport = { ...SEED_VOC_REPORT, workspaceId: ws.id };
     db.reports.set(ws.id, [wsReport]);
-  });
+
+    // Populate vector embeddings in vector engine
+    await vectorEngine.indexBatch(ws.id, feedbackList, geminiClient);
+  }
 
   SEED_USERS.forEach((u) => {
     db.users.set(u.id, u);
   });
 
   console.log(
-    `[LOOP DB] Seeded ${db.workspaces.size} workspaces with 120+ feedback items each.`
+    `[LOOP DB & Vector Engine] Seeded ${db.workspaces.size} workspaces with 120+ feedback items and populated vector embeddings & content hashes.`
   );
 }
 
-initializeDatabase();
+initializeDatabase().catch((err) => {
+  console.warn("[LOOP Vector Engine Init Note]:", err?.message);
+});
 
 // Role Authorization Middleware Helper
 function requireRole(allowedRoles: UserRole[]) {
@@ -377,6 +396,19 @@ Output valid JSON with:
       const id = `fb-pub-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const currentList = db.feedback.get(targetWorkspaceId) || [];
 
+      // Check Deduplication Hashing & Semantic Similarity Threshold
+      let geminiClient: GoogleGenAI | undefined;
+      try {
+        if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+      } catch (e) {}
+
+      const dupCheck = await vectorEngine.checkDuplicate(
+        targetWorkspaceId,
+        { content, title: title || `${classification.featureArea} Feedback`, customerCompany, customerName },
+        0.88,
+        geminiClient
+      );
+
       const newItem: FeedbackItem = {
         id,
         workspaceId: targetWorkspaceId,
@@ -397,14 +429,28 @@ Output valid JSON with:
         createdAt: new Date().toISOString(),
         aiSummary: classification.aiSummary,
         keyQuote: classification.keyQuote,
+        contentHash: dupCheck.contentHash,
+        isDuplicate: dupCheck.isDuplicate,
+        duplicateOfId: dupCheck.matchedItem?.id,
+        duplicateOfTitle: dupCheck.matchedItem?.title,
+        duplicateSimilarityScore: dupCheck.similarityScore,
+        duplicateType: dupCheck.matchType !== 'NONE' ? dupCheck.matchType : undefined,
       };
 
       db.feedback.set(targetWorkspaceId, [newItem, ...currentList]);
 
+      // Index in vector engine
+      vectorEngine.indexItem(targetWorkspaceId, newItem, geminiClient).catch((err) => {
+        console.warn("[LOOP Vector Index Public Warning]:", err?.message);
+      });
+
       res.status(201).json({
         success: true,
-        message: "Thank you for your feedback! It has been successfully analyzed and submitted to our product team.",
+        message: dupCheck.isDuplicate
+          ? "Thank you! Your feedback matches an existing logged topic and has been linked to our product team's tracker."
+          : "Thank you for your feedback! It has been successfully analyzed and submitted to our product team.",
         item: newItem,
+        deduplication: dupCheck,
       });
     } catch (err: any) {
       console.error("[LOOP Public Feedback Error]:", err);
@@ -413,17 +459,30 @@ Output valid JSON with:
   });
 
   // Reseed Endpoint (For testing & mentor grading)
-  app.post("/api/workspaces/:workspaceId/reseed", requireRole(["ADMIN"]), (req, res) => {
+  app.post("/api/workspaces/:workspaceId/reseed", requireRole(["ADMIN"]), async (req, res) => {
     const { workspaceId } = req.params;
-    db.feedback.set(workspaceId, generateSeedFeedback(workspaceId));
+    const feedbackList = generateSeedFeedback(workspaceId).map((item) => ({
+      ...item,
+      contentHash: item.contentHash || computeContentHash(item.content, item.customerCompany),
+    }));
+    db.feedback.set(workspaceId, feedbackList);
     db.themes.set(
       workspaceId,
       SEED_THEMES.map((t) => ({ ...t, workspaceId }))
     );
     db.reports.set(workspaceId, [{ ...SEED_VOC_REPORT, workspaceId }]);
+
+    // Re-index Vector Store
+    vectorEngine.clearWorkspace(workspaceId);
+    let geminiClient: GoogleGenAI | undefined;
+    try {
+      if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+    } catch (e) {}
+    await vectorEngine.indexBatch(workspaceId, feedbackList, geminiClient);
+
     res.json({
       success: true,
-      message: `Workspace '${workspaceId}' reseeded with 125 realistic records.`,
+      message: `Workspace '${workspaceId}' reseeded with 125 realistic records and vector embeddings re-indexed.`,
       feedbackCount: db.feedback.get(workspaceId)?.length || 0,
     });
   });
@@ -521,7 +580,51 @@ Output valid JSON with:
     });
   });
 
-  // Single Feedback Ingestion with Automatic AI Classification (Role: ADMIN, ANALYST)
+  // Dedicated Duplicate Pre-Check Endpoint (Real-Time Ingestion Radar)
+  app.post(
+    "/api/workspaces/:workspaceId/feedback/check-duplicate",
+    requireRole(["ADMIN", "ANALYST", "VIEWER"]),
+    async (req, res) => {
+      try {
+        const { workspaceId } = req.params;
+        const {
+          content,
+          title,
+          customerCompany,
+          customerName,
+          similarityThreshold = 0.88,
+        } = req.body;
+
+        if (!content || typeof content !== "string" || !content.trim()) {
+          return res.status(400).json({ error: "Content parameter is required for duplicate check." });
+        }
+
+        let geminiClient: GoogleGenAI | undefined;
+        try {
+          if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+        } catch (e) {}
+
+        const result = await vectorEngine.checkDuplicate(
+          workspaceId,
+          {
+            content: content.trim(),
+            title: title?.trim(),
+            customerCompany: customerCompany?.trim(),
+            customerName: customerName?.trim(),
+          },
+          Number(similarityThreshold) || 0.88,
+          geminiClient
+        );
+
+        res.json(result);
+      } catch (err: any) {
+        console.error("Error during duplicate check:", err);
+        res.status(500).json({ error: err.message || "Failed to check duplicates." });
+      }
+    }
+  );
+
+  // Single Feedback Ingestion with Automatic AI Classification & Deduplication
   app.post(
     "/api/workspaces/:workspaceId/feedback",
     requireRole(["ADMIN", "ANALYST", "VIEWER"]),
@@ -536,6 +639,9 @@ Output valid JSON with:
           channel = "INTERCOM",
           urgency,
           skipAi = false,
+          checkDuplicates = true,
+          deduplicationMode = "flag", // "flag" | "reject" | "merge" | "allow"
+          similarityThreshold = 0.88,
         } = req.body;
 
         const content = (req.body.content || req.body.feedback || req.body.text || req.body.body || "").trim();
@@ -543,6 +649,65 @@ Output valid JSON with:
 
         if (!content) {
           return res.status(400).json({ error: "Feedback content is required." });
+        }
+
+        let geminiClient: GoogleGenAI | undefined;
+        try {
+          if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+        } catch (e) {}
+
+        // Run Deduplication Hashing & Semantic Similarity Threshold Check
+        let dupCheck: DeduplicationResult = {
+          isDuplicate: false,
+          matchType: "NONE",
+          similarityScore: 0,
+          contentHash: computeContentHash(content, customerCompany),
+        };
+
+        if (checkDuplicates && deduplicationMode !== "allow") {
+          dupCheck = await vectorEngine.checkDuplicate(
+            workspaceId,
+            { content, title, customerCompany, customerName },
+            Number(similarityThreshold) || 0.88,
+            geminiClient
+          );
+
+          if (dupCheck.isDuplicate) {
+            // If strict rejection requested
+            if (deduplicationMode === "reject") {
+              return res.status(409).json({
+                error: dupCheck.matchType === "EXACT_HASH"
+                  ? "Rejected: Exact duplicate content hash found in workspace."
+                  : `Rejected: Semantic similarity threshold exceeded (${Math.round(dupCheck.similarityScore * 100)}% match with ticket #${dupCheck.matchedItem?.id}).`,
+                duplicateResult: dupCheck,
+              });
+            }
+
+            // If merge requested, increment count on existing item
+            if (deduplicationMode === "merge" && dupCheck.matchedItem) {
+              const currentList = db.feedback.get(workspaceId) || [];
+              const targetIdx = currentList.findIndex((i) => i.id === dupCheck.matchedItem?.id);
+              if (targetIdx !== -1) {
+                const existing = currentList[targetIdx];
+                const updated: FeedbackItem = {
+                  ...existing,
+                  duplicateCount: (existing.duplicateCount || 1) + 1,
+                  actionNotes: existing.actionNotes
+                    ? `${existing.actionNotes}\n[Merged Duplicate on ${new Date().toLocaleDateString()} from ${customerName}]`
+                    : `[Merged Duplicate on ${new Date().toLocaleDateString()} from ${customerName}]`,
+                };
+                currentList[targetIdx] = updated;
+                db.feedback.set(workspaceId, currentList);
+                return res.json({
+                  success: true,
+                  merged: true,
+                  mergedIntoId: existing.id,
+                  item: updated,
+                  duplicateResult: dupCheck,
+                });
+              }
+            }
+          }
         }
 
         // Rule-based default heuristic classification
@@ -590,9 +755,8 @@ Output valid JSON with:
         };
 
         // Run AI Auto-Classification via Gemini 3.7 if key is configured
-        if (!skipAi && process.env.GEMINI_API_KEY) {
+        if (!skipAi && process.env.GEMINI_API_KEY && geminiClient) {
           try {
-            const ai = getGeminiClient();
             const aiPrompt = `Analyze this customer feedback submission for a B2B SaaS platform and return a strict JSON classification:
 
 CUSTOMER FEEDBACK:
@@ -610,7 +774,7 @@ Return JSON adhering to schema:
 - aiSummary: concise 1-sentence analytical summary of the core friction or praise
 - keyQuote: the most impactful quote extracted directly from the content`;
 
-            const aiResp = await ai.models.generateContent({
+            const aiResp = await geminiClient.models.generateContent({
               model: "gemini-3.7-flash",
               contents: aiPrompt,
               config: {
@@ -681,13 +845,29 @@ Return JSON adhering to schema:
           createdAt: new Date().toISOString(),
           aiSummary: classification.aiSummary,
           keyQuote: classification.keyQuote,
+          // Deduplication flags & hash
+          contentHash: dupCheck.contentHash,
+          isDuplicate: dupCheck.isDuplicate,
+          duplicateOfId: dupCheck.matchedItem?.id,
+          duplicateOfTitle: dupCheck.matchedItem?.title,
+          duplicateSimilarityScore: dupCheck.similarityScore,
+          duplicateType: dupCheck.matchType !== "NONE" ? dupCheck.matchType : undefined,
+          duplicateCount: 1,
         };
 
         const currentList = db.feedback.get(workspaceId) || [];
         currentList.unshift(newItem);
         db.feedback.set(workspaceId, currentList);
 
-        res.status(201).json(newItem);
+        // Real-time vector index ingestion
+        vectorEngine.indexItem(workspaceId, newItem, geminiClient).catch((err) => {
+          console.warn("[LOOP Vector Ingest Warning]:", err?.message);
+        });
+
+        res.status(201).json({
+          ...newItem,
+          deduplication: dupCheck,
+        });
       } catch (err: any) {
         console.error("Error creating feedback:", err);
         res.status(500).json({ error: err.message || "Failed to ingest feedback." });
@@ -695,7 +875,7 @@ Return JSON adhering to schema:
     }
   );
 
-  // Bulk CSV Ingestion (Role: ADMIN, ANALYST, VIEWER)
+  // Bulk CSV Ingestion with Intra-Batch & Workspace Deduplication (Role: ADMIN, ANALYST, VIEWER)
   app.post(
     "/api/workspaces/:workspaceId/feedback/bulk",
     requireRole(["ADMIN", "ANALYST", "VIEWER"]),
@@ -703,13 +883,35 @@ Return JSON adhering to schema:
       try {
         const { workspaceId } = req.params;
         const rawRows = req.body.rows || req.body.items || req.body.data || (Array.isArray(req.body) ? req.body : []);
+        const {
+          skipDuplicates = false,
+          deduplicationMode = skipDuplicates ? "skip" : "flag", // "skip" | "flag" | "allow"
+          similarityThreshold = 0.88,
+        } = req.body;
 
         if (!Array.isArray(rawRows) || rawRows.length === 0) {
           return res.status(400).json({ error: "No rows provided for bulk ingestion." });
         }
 
+        let geminiClient: GoogleGenAI | undefined;
+        try {
+          if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+        } catch (e) {}
+
         const currentList = db.feedback.get(workspaceId) || [];
         const addedItems: FeedbackItem[] = [];
+        const seenHashesInBatch = new Set<string>();
+        const duplicateDetails: Array<{
+          rowIndex: number;
+          title: string;
+          matchType: 'EXACT_HASH' | 'SEMANTIC_SIMILARITY';
+          similarityScore: number;
+          matchedExistingId?: string;
+          action: 'skipped' | 'flagged';
+        }> = [];
+
+        let duplicatesSkipped = 0;
+        let duplicatesFlagged = 0;
 
         for (let i = 0; i < rawRows.length; i++) {
           const r = rawRows[i];
@@ -718,7 +920,71 @@ Return JSON adhering to schema:
           const content = (r.content || r.feedback || r.text || r.body || r.message || r.description || r.comment || r.review || "").trim();
           if (!content) continue;
 
+          const customerCompany = r.customerCompany || r.company || r.org || "Enterprise Customer";
           const customerName = (r.customerName || r.name || r.user || r.customer || r.author || `User ${i + 1}`).trim();
+          const title = r.title || r.summary || r.subject || `Imported Feedback #${i + 1}`;
+          const contentHash = computeContentHash(content, customerCompany);
+
+          // Check Deduplication
+          let isDup = false;
+          let dupType: 'EXACT_HASH' | 'SEMANTIC_SIMILARITY' = 'EXACT_HASH';
+          let dupScore = 1.0;
+          let matchedExistingId: string | undefined;
+          let matchedExistingTitle: string | undefined;
+
+          if (deduplicationMode !== "allow") {
+            // Intra-batch duplicate check
+            if (seenHashesInBatch.has(contentHash)) {
+              isDup = true;
+              dupType = "EXACT_HASH";
+              dupScore = 1.0;
+            } else {
+              seenHashesInBatch.add(contentHash);
+
+              // Workspace database duplicate check
+              const dupCheck = await vectorEngine.checkDuplicate(
+                workspaceId,
+                { content, title, customerCompany, customerName },
+                Number(similarityThreshold) || 0.88,
+                geminiClient
+              );
+
+              if (dupCheck.isDuplicate) {
+                isDup = true;
+                dupType = dupCheck.matchType as any;
+                dupScore = dupCheck.similarityScore;
+                matchedExistingId = dupCheck.matchedItem?.id;
+                matchedExistingTitle = dupCheck.matchedItem?.title;
+              }
+            }
+          }
+
+          // Handle duplicate action
+          if (isDup && deduplicationMode === "skip") {
+            duplicatesSkipped++;
+            duplicateDetails.push({
+              rowIndex: i + 1,
+              title,
+              matchType: dupType,
+              similarityScore: dupScore,
+              matchedExistingId,
+              action: "skipped",
+            });
+            continue; // Skip adding to database
+          }
+
+          if (isDup && deduplicationMode === "flag") {
+            duplicatesFlagged++;
+            duplicateDetails.push({
+              rowIndex: i + 1,
+              title,
+              matchType: dupType,
+              similarityScore: dupScore,
+              matchedExistingId,
+              action: "flagged",
+            });
+          }
+
           const channel = (r.channel || r.source || "CSV_IMPORT").toUpperCase();
           const sentiment =
             r.sentiment?.toUpperCase() === "POSITIVE"
@@ -739,11 +1005,11 @@ Return JSON adhering to schema:
           const item: FeedbackItem = {
             id,
             workspaceId,
-            title: r.title || r.summary || r.subject || `Imported Feedback #${i + 1}`,
+            title,
             content,
             customerName,
             customerEmail: r.customerEmail || r.email || `${customerName.toLowerCase().replace(/[^a-z0-9]/g, ".")}@example.com`,
-            customerCompany: r.customerCompany || r.company || r.org || "Enterprise Customer",
+            customerCompany,
             customerTier: r.customerTier || r.tier || "PRO",
             channel: channel as any,
             sentiment,
@@ -756,20 +1022,33 @@ Return JSON adhering to schema:
             createdAt: r.createdAt || new Date().toISOString(),
             aiSummary: content.slice(0, 100),
             keyQuote: `"${content.slice(0, 100)}"`,
+            contentHash,
+            isDuplicate: isDup,
+            duplicateOfId: matchedExistingId,
+            duplicateOfTitle: matchedExistingTitle,
+            duplicateSimilarityScore: isDup ? dupScore : undefined,
+            duplicateType: isDup ? dupType : undefined,
           };
 
           addedItems.push(item);
         }
 
-        if (addedItems.length === 0) {
-          return res.status(400).json({ error: "No valid rows with feedback content found to import." });
-        }
+        if (addedItems.length > 0) {
+          db.feedback.set(workspaceId, [...addedItems, ...currentList]);
 
-        db.feedback.set(workspaceId, [...addedItems, ...currentList]);
+          // Batch index embeddings for bulk rows
+          vectorEngine.indexBatch(workspaceId, addedItems, geminiClient).catch((err) => {
+            console.warn("[LOOP Bulk Vector Ingest Warning]:", err?.message);
+          });
+        }
 
         res.json({
           success: true,
           count: addedItems.length,
+          totalProcessed: rawRows.length,
+          duplicatesSkipped,
+          duplicatesFlagged,
+          duplicateDetails,
           totalFeedback: db.feedback.get(workspaceId)?.length || 0,
         });
       } catch (err: any) {
@@ -1008,12 +1287,82 @@ For each theme, produce:
   );
 
   // -------------------------------------------------------------
-  // AI Feature 3: Ask LOOP (Grounded Q&A / RAG over Real Feedback)
+  // AI Feature 3: Ask LOOP (Vector Hybrid RAG over Real Feedback)
   // -------------------------------------------------------------
+  // Vector Store Diagnostics and Reindexing
+  app.get("/api/workspaces/:workspaceId/vector-index/status", (req, res) => {
+    const { workspaceId } = req.params;
+    const feedbackCount = db.feedback.get(workspaceId)?.length || 0;
+    const status = vectorEngine.getStatus(workspaceId, feedbackCount);
+    res.json({
+      ...status,
+      totalFeedbackInDb: feedbackCount,
+      coveragePercent: feedbackCount > 0 ? Math.round((status.totalVectors / feedbackCount) * 100) : 100,
+    });
+  });
+
+  app.post("/api/workspaces/:workspaceId/vector-index/reindex", requireRole(["ADMIN", "ANALYST"]), async (req, res) => {
+    try {
+      const { workspaceId } = req.params;
+      const feedbackList = db.feedback.get(workspaceId) || [];
+      
+      let geminiClient: GoogleGenAI | undefined;
+      try {
+        if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+      } catch (e) {}
+
+      vectorEngine.clearWorkspace(workspaceId);
+      await vectorEngine.indexBatch(workspaceId, feedbackList, geminiClient);
+      const status = vectorEngine.getStatus(workspaceId, feedbackList.length);
+
+      res.json({
+        success: true,
+        message: `Successfully re-indexed ${feedbackList.length} records into vector store.`,
+        stats: status,
+      });
+    } catch (err: any) {
+      console.error("Vector reindex error:", err);
+      res.status(500).json({ error: err.message || "Failed to reindex vector store." });
+    }
+  });
+
+  // Vector Hybrid Search Endpoint
+  app.post("/api/workspaces/:workspaceId/vector-search", async (req, res) => {
+    try {
+      const { workspaceId } = req.params;
+      const { query, mode = "hybrid", alpha = 0.5, topK = 10 } = req.body;
+
+      if (!query || typeof query !== "string") {
+        return res.status(400).json({ error: "Query parameter is required." });
+      }
+
+      let geminiClient: GoogleGenAI | undefined;
+      try {
+        if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+      } catch (e) {}
+
+      const searchResult = await vectorEngine.search(
+        workspaceId,
+        query,
+        {
+          topK: Number(topK) || 10,
+          searchMode: mode as any,
+          alpha: Number(alpha) || 0.5,
+        },
+        geminiClient
+      );
+
+      res.json(searchResult);
+    } catch (err: any) {
+      console.error("Vector search error:", err);
+      res.status(500).json({ error: err.message || "Vector search failed." });
+    }
+  });
+
   app.post("/api/workspaces/:workspaceId/ask", async (req, res) => {
     try {
       const { workspaceId } = req.params;
-      const { question, history = [] } = req.body;
+      const { question, history = [], searchMode = "hybrid", alpha = 0.5 } = req.body;
 
       if (!question || typeof question !== "string" || !question.trim()) {
         return res.status(400).json({ error: "Question parameter is required." });
@@ -1027,30 +1376,29 @@ For each theme, produce:
         });
       }
 
-      // Semantic Retrieval Simulation / Keyword & Relevancy Ranking
-      const queryTerms = question.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-      
-      const scoredItems = allFeedback.map((item) => {
-        let score = 0;
-        const text = `${item.title} ${item.content} ${item.featureArea} ${item.themes.join(" ")} ${item.tags.join(" ")}`.toLowerCase();
-        
-        queryTerms.forEach((term) => {
-          if (text.includes(term)) score += 3;
-          if (item.title.toLowerCase().includes(term)) score += 2;
-          if (item.featureArea.toLowerCase().includes(term)) score += 2;
-        });
+      let geminiClient: GoogleGenAI | undefined;
+      try {
+        if (process.env.GEMINI_API_KEY) geminiClient = getGeminiClient();
+      } catch (e) {}
 
-        // Boost recent and critical tickets
-        if (item.urgency === "CRITICAL") score += 1;
-        if (item.customerTier === "ENTERPRISE") score += 1;
+      // Hybrid Vector + Lexical Semantic Retrieval
+      const searchResult = await vectorEngine.search(
+        workspaceId,
+        question,
+        {
+          topK: 12,
+          searchMode: searchMode as any,
+          alpha: Number(alpha) || 0.5,
+        },
+        geminiClient
+      );
 
-        return { item, score };
-      });
+      const topCandidates = searchResult.results.map((r) => r.item);
 
-      scoredItems.sort((a, b) => b.score - a.score);
-      const topCandidates = scoredItems.slice(0, 12).map((s) => s.item);
+      // Fallback to in-memory items if vector search returned nothing
+      const finalCandidates = topCandidates.length > 0 ? topCandidates : allFeedback.slice(0, 10);
 
-      const groundedSources: GroundedSource[] = topCandidates.slice(0, 6).map((c) => ({
+      const groundedSources: GroundedSource[] = finalCandidates.slice(0, 6).map((c) => ({
         id: c.id,
         customerName: c.customerName,
         customerTier: c.customerTier,
@@ -1063,7 +1411,8 @@ For each theme, produce:
 
       const ai = getGeminiClient();
 
-      const groundingContext = topCandidates
+      const groundingContext = finalCandidates
+        .slice(0, 8)
         .map(
           (c, idx) => `[Source ${idx + 1} | ID: ${c.id}]
 Customer: ${c.customerName} (${c.customerCompany || "N/A"}, Tier: ${c.customerTier}, Channel: ${c.channel}, Date: ${c.createdAt.split("T")[0]})
@@ -1077,7 +1426,7 @@ Feedback Quote: "${c.content}"`
 CRITICAL NON-NEGOTIABLE GROUNDING RULES:
 1. You MUST answer strictly from the real customer feedback records provided below in the EVIDENCE CONTEXT.
 2. DO NOT make up hypothetical scenarios, phantom customer quotes, or unverified claims.
-3. Explicitly cite your sources using tags like [Source 1], [Source 2], or referencing ticket IDs (e.g. ${topCandidates[0]?.id || "ID"}).
+3. Explicitly cite your sources using tags like [Source 1], [Source 2], or referencing ticket IDs (e.g. ${finalCandidates[0]?.id || "ID"}).
 4. If the retrieved evidence does not contain sufficient information to answer the question, state honestly what is missing in the dataset.
 5. Structure your response with an Executive Direct Answer, Key Evidence & Quotes, and Recommended Product Actions.
 
@@ -1098,6 +1447,12 @@ ${question}`;
       res.json({
         answer: aiResponse.text,
         sources: groundedSources,
+        retrievalMeta: {
+          searchMode,
+          retrievalLatencyMs: searchResult.stats.latencyMs,
+          totalRetrieved: searchResult.results.length,
+          topSimilarityScore: searchResult.results[0]?.similarityScore || searchResult.results[0]?.denseScore || 0,
+        },
         suggestedFollowups: [
           "Which customer tier is most impacted by this issue?",
           "Show me the recommended engineering fix and priority.",
